@@ -3,19 +3,23 @@ name: Build unsigned IPA (PPSSPP iOS)
 on:
   workflow_dispatch:
     inputs:
+      runner:
+        description: "runner label (macos-15 / macos-26 / macos-14)"
+        required: false
+        default: "macos-15"
       reason:
         description: "Why build (free text)"
         required: false
         default: "learning run"
 
 concurrency:
-  group: ios-ipa
+  group: ios-ipa-${{ inputs.runner }}
   cancel-in-progress: false
 
 jobs:
   ios:
     name: PPSSPP.app -> unsigned .ipa
-    runs-on: macos-15
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 300
 
     steps:

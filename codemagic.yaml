@@ -1,0 +1,111 @@
+# Codemagic build config for PPSSPP iOS (unsigned IPA)
+# Why here: GitHub's hosted macOS runners never got allocated for this repo,
+# Codemagic runs on its own macOS M-series machines instead.
+#
+# Usage: codemagic.io -> sign in with GitHub -> Add application -> pick
+# 871554520/ppsspp -> configuration: codemagic.yaml -> run workflow
+# "ppsspp-ios-unsigned-ipa".
+
+workflows:
+  ppsspp-ios-unsigned-ipa:
+    name: PPSSPP iOS unsigned IPA
+    instance_type: mac_mini_m2
+    max_build_duration: 150
+    environment:
+      ccache: true
+      xcode: latest
+      vars:
+        CC: clang
+        CXX: clang++
+        USE_CCACHE: "1"
+        ZERO_AR_DATE: "1"
+    cache:
+      cache_paths:
+        - $HOME/.ccache
+    scripts:
+      - name: Checkout PPSSPP with submodules
+        script: |
+          set -eux
+          if [ -d src/.git ]; then
+            cd src
+            git fetch --tags --force origin || true
+            git submodule update --init --recursive --depth 1
+          else
+            git clone --recurse-submodules --shallow-submodules \
+              https://github.com/871554520/ppsspp.git src
+          fi
+          cd src
+          git describe --always
+
+      - name: Install build tools
+        script: |
+          set -eux
+          brew install cmake ldid dpkg
+          xcodebuild -version
+          cmake --version | head -1
+
+      - name: Build (cmake -> xcodebuild archive -> ldid -> zip)
+        script: |
+          set -eux
+          cd src
+          export PATH="/opt/homebrew/opt/ccache/libexec:$PATH"
+          export CCACHE_SLOPPINESS=pch_defines,clang_index_store,ivfsoverlay,include_file_ctime,include_file_mtime,modules,system_headers,time_macros
+          export CCACHE_FILECLONE=true
+          export CCACHE_DEPEND=true
+          export CCACHE_COMPILERCHECK=content
+          set +e
+          ./b-ios.sh
+          rc=$?
+          set -e
+          echo "b-ios.sh exited with $rc"
+          if [ "$rc" -ne 0 ] && [ ! -e build/PPSSPP-iOS-*.ipa ]; then
+            echo "b-ios.sh failed before packaging an IPA; the rescue step will try next"
+          fi
+
+      - name: Rescue packaging (if b-ios.sh died after compiling)
+        script: |
+          set -eux
+          cd src
+          mkdir -p build
+          if ls build/*.ipa >/dev/null 2>&1; then
+            echo "IPA already produced by b-ios.sh"
+            exit 0
+          fi
+          APP=""
+          if [ -d build-ios/build/PPSSPP.xcarchive/Products/Applications/PPSSPP.app ]; then
+            APP="build-ios/build/PPSSPP.xcarchive/Products/Applications/PPSSPP.app"
+          elif [ -d build-ios/Release-iphoneos/PPSSPP.app ]; then
+            APP="build-ios/Release-iphoneos/PPSSPP.app"
+          fi
+          if [ -z "$APP" ]; then
+            echo "No compiled .app bundle found - nothing to package."
+            exit 0
+          fi
+          rm -rf build-ios/Payload
+          mkdir -p build-ios/Payload
+          cp -R "$APP" build-ios/Payload/
+          ( cd build-ios && zip -r9 ../build/PPSSPP-iOS-rescue.ipa Payload )
+
+      - name: Verify IPA structure (fails the build on a fake IPA)
+        script: |
+          set -eux
+          cd src
+          IPA=$(ls -S build/*.ipa 2>/dev/null | head -1 || true)
+          if [ -z "$IPA" ]; then
+            echo "FAIL no .ipa was produced at all"
+            exit 1
+          fi
+          echo "IPA: $IPA ($(du -h "$IPA" | cut -f1))"
+          unzip -l "$IPA" | head -40
+          python3 ci/verify_ipa.py "$IPA"
+
+    publishing:
+      # Keep the artifact even on failure so we can study the log next time.
+      scripts:
+        - name: Summary
+          script: |
+            echo "IPA files:"; ls -lh src/build/*.ipa 2>/dev/null || echo "  (none)"
+
+    artifacts:
+      - src/build/*.ipa
+      - src/build/*.deb

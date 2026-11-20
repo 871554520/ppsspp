@@ -1,0 +1,17 @@
+name: Probe runner availability
+on:
+  workflow_dispatch: {}
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - run: |
+          echo "linux runner OK"; uname -a; python3 --version
+  mac:
+    runs-on: macos-15
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - run: |
+          echo "mac runner OK"; sw_vers; xcodebuild -version

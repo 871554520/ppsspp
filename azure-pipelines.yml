@@ -1,0 +1,73 @@
+# Azure DevOps Pipelines: PPSSPP iOS unsigned IPA
+# Free tier includes 1,800 hosted minutes/month; macOS is billed at a 10x
+# multiplier, so realistically ~180 minutes of macOS per month here.
+# Connect this repo in Azure DevOps -> Pipelines -> New pipeline -> GitHub ->
+# 871554520/ppsspp -> Existing YAML -> /azure-pipelines.yml.
+
+trigger: none
+pr: none
+
+jobs:
+  - job: ios_ipa
+    displayName: PPSSPP.app -> unsigned .ipa
+    timeoutInMinutes: 120
+    pool:
+      vmImage: macos-15
+
+    steps:
+      - script: |
+          set -eux
+          git clone --recurse-submodules --shallow-submodules \
+            https://github.com/871554520/ppsspp.git src
+          cd src
+          git describe --always
+        displayName: Clone PPSSPP with submodules
+
+      - script: |
+          set -eux
+          brew install cmake ldid dpkg
+          xcodebuild -version
+          cmake --version | head -1
+        displayName: Install build tools
+
+      - script: |
+          set -eux
+          cd src
+          export PATH="/opt/homebrew/opt/ccache/libexec:$PATH"
+          set +e
+          ./b-ios.sh
+          rc=$?
+          set -e
+          echo "b-ios.sh exited with $rc"
+        displayName: Build (cmake -> archive -> ldid -> zip)
+
+      - script: |
+          set -eux
+          cd src
+          mkdir -p build
+          if ls build/*.ipa >/dev/null 2>&1; then exit 0; fi
+          APP=""
+          if [ -d build-ios/build/PPSSPP.xcarchive/Products/Applications/PPSSPP.app ]; then
+            APP="build-ios/build/PPSSPP.xcarchive/Products/Applications/PPSSPP.app"
+          elif [ -d build-ios/Release-iphoneos/PPSSPP.app ]; then
+            APP="build-ios/Release-iphoneos/PPSSPP.app"
+          fi
+          [ -z "$APP" ] && { echo "no .app bundle produced"; exit 0; }
+          rm -rf build-ios/Payload && mkdir -p build-ios/Payload
+          cp -R "$APP" build-ios/Payload/
+          ( cd build-ios && zip -r9 ../build/PPSSPP-iOS-rescue.ipa Payload )
+        displayName: Rescue packaging if needed
+
+      - script: |
+          set -eux
+          cd src
+          IPA=$(ls -S build/*.ipa 2>/dev/null | head -1 || true)
+          [ -z "$IPA" ] && { echo "FAIL: no .ipa produced"; exit 1; }
+          echo "IPA: $IPA ($(du -h "$IPA" | cut -f1))"
+          unzip -l "$IPA" | head -30
+          python3 ci/verify_ipa.py "$IPA"
+        displayName: Verify IPA structure
+
+      - publish: $(System.DefaultWorkingDirectory)/src/build
+        artifact: ppsspp-ios-ipa
+        displayName: Publish artifact

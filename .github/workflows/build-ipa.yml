@@ -1,0 +1,109 @@
+name: Build unsigned IPA (PPSSPP iOS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why build (free text)"
+        required: false
+        default: "learning run"
+
+concurrency:
+  group: ios-ipa
+  cancel-in-progress: false
+
+jobs:
+  ios:
+    name: PPSSPP.app -> unsigned .ipa
+    runs-on: macos-15
+    timeout-minutes: 300
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Ensure version tags exist (git describe needs them)
+        run: |
+          set -eux
+          count=$(git tag -l 'v[0-9]*' | wc -l | tr -d ' ')
+          echo "local v-tags: $count"
+          if [ "$count" = "0" ]; then
+            git remote add upstream https://github.com/hrydgard/ppsspp.git || true
+            git fetch --deepen=15000 --no-recurse-submodules --tags --force upstream || true
+          fi
+          git describe --always
+
+      - name: Install build dependencies
+        run: |
+          set -eux
+          brew install cmake ldid dpkg
+          xcodebuild -version
+          cmake --version | head -1
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: ios-${{ runner.os }}
+          create-symlink: true
+
+      - name: Build (cmake -> xcodebuild archive -> ldid -> zip)
+        id: build
+        continue-on-error: true
+        env:
+          CC: clang
+          CXX: clang++
+          USE_CCACHE: 1
+        run: |
+          export PATH="/usr/lib/ccache:/usr/local/opt/ccache/libexec:$PATH"
+          export CCACHE_SLOPPINESS=pch_defines,clang_index_store,ivfsoverlay,include_file_ctime,include_file_mtime,modules,system_headers,time_macros
+          export CCACHE_FILECLONE=true
+          export CCACHE_DEPEND=true
+          export CCACHE_COMPILERCHECK=content
+          ./b-ios.sh
+
+      - name: Rescue packaging (if b-ios.sh died after compiling)
+        if: steps.build.outcome == 'failure'
+        run: |
+          set -eux
+          mkdir -p build
+          APP=""
+          if [ -d build-ios/build/PPSSPP.xcarchive/Products/Applications/PPSSPP.app ]; then
+            APP="build-ios/build/PPSSPP.xcarchive/Products/Applications/PPSSPP.app"
+          elif [ -d build-ios/Release-iphoneos/PPSSPP.app ]; then
+            APP="build-ios/Release-iphoneos/PPSSPP.app"
+          fi
+          if [ -z "$APP" ]; then
+            echo "::error::build produced no .app bundle - nothing to package"
+            exit 1
+          fi
+          echo "packaging from: $APP (b-ios.sh stopped early)"
+          rm -rf build-ios/Payload
+          mkdir -p build-ios/Payload
+          cp -R "$APP" build-ios/Payload/
+          ( cd build-ios && zip -r9 ../build/PPSSPP-iOS-rescue.ipa Payload )
+
+      - name: Verify IPA structure
+        run: |
+          set -eux
+          IPA=$(ls -S build/*.ipa | head -1)
+          echo "IPA: $IPA ($(du -h "$IPA" | cut -f1))"
+          unzip -l "$IPA" | head -40
+          python3 ci/verify_ipa.py "$IPA"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v7
+        with:
+          name: ppsspp-ios-unsigned-ipa
+          path: build/*.ipa
+          if-no-files-found: error
+
+      - name: Upload xcarchive (for study)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ppsspp-ios-xcarchive
+          path: build-ios/build/PPSSPP.xcarchive
+          if-no-files-found: warn
